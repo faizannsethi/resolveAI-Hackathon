@@ -1,0 +1,7 @@
+pydantic>=2.7,<3
+pypdf>=4.2
+requests>=2.31
+python-dateutil>=2.9
+pytest>=8.2
+# Optional offline speech-to-text fallback for transcribe_audio:
+# faster-whisper>=1.0
