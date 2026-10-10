@@ -5,6 +5,9 @@ __pycache__/
 runs/
 api_key
 Property Management/
-.env.example
-Real-World Agents Hackathon Rules For Participants.pdf
-pytest.ini
+eleven_labs_api_key
+voice/cases/
+voice/recordings/
+voice/callbacks/
+voice/outbox/
+voice/answers/

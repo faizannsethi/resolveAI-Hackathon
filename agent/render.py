@@ -92,7 +92,7 @@ def _bullets(items) -> str:
     return "\n".join(f"- {i}" for i in items) if items else "- none"
 
 
-def render_answer(case_id: str, result: dict, answer_dir: Path) -> None:
+def render_answer(case_id: str, result: dict, answer_dir: Path, with_trace: bool = False) -> None:
     meta, decision = result["meta"], result["decision"]
     ledger = read_ledger(case_id)
     actions = [e for e in ledger if e.get("ok") and e.get("side_effect") and not e.get("duplicate")]
@@ -167,9 +167,10 @@ def render_answer(case_id: str, result: dict, answer_dir: Path) -> None:
     answer_dir.mkdir(parents=True, exist_ok=True)
     (answer_dir / "ANSWER.md").write_text("\n\n".join(answer) + "\n", encoding="utf-8")
     (answer_dir / "REASONING.md").write_text("\n\n".join(reasoning) + "\n", encoding="utf-8")
-    trace_dir = answer_dir / "trace"
-    trace_dir.mkdir(exist_ok=True)
-    for name in ("decision.json", "transcript.json", "ledger.jsonl", "context.json"):
-        src = run_dir() / case_id / name
-        if src.exists():
-            shutil.copy(src, trace_dir / name)
+    if with_trace:
+        trace_dir = answer_dir / "trace"
+        trace_dir.mkdir(exist_ok=True)
+        for name in ("decision.json", "transcript.json", "ledger.jsonl", "context.json"):
+            src = run_dir() / case_id / name
+            if src.exists():
+                shutil.copy(src, trace_dir / name)

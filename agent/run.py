@@ -42,10 +42,13 @@ def answer_folder_name(case_path: Path) -> str:
 
 def discover_cases(cases_dir: Path) -> list[Path]:
     """Each sub-folder is a case; loose files at the top level are cases too."""
-    found = [p for p in sorted(cases_dir.iterdir()) if p.is_dir() and not p.name.startswith(".")]
-    found += [p for p in sorted(cases_dir.iterdir())
+    def natural(p: Path):
+        return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)]
+
+    found = [p for p in cases_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    found += [p for p in cases_dir.iterdir()
               if p.is_file() and p.suffix.lower() in {".md", ".json", ".txt"} and not p.name.startswith(".")]
-    return found
+    return sorted(found, key=natural)
 
 
 def practice_jobs(split: str, seed: int, limit: int | None) -> list[dict]:
@@ -69,7 +72,7 @@ def practice_jobs(split: str, seed: int, limit: int | None) -> list[dict]:
     return jobs
 
 
-def run_one(job: dict, answers_root: Path, config: AgentConfig, force: bool) -> dict:
+def run_one(job: dict, answers_root: Path, config: AgentConfig, force: bool, with_trace: bool = False) -> dict:
     from agent.loop import run_case
     from agent.render import render_answer
 
@@ -80,7 +83,7 @@ def run_one(job: dict, answers_root: Path, config: AgentConfig, force: bool) -> 
     try:
         result = run_case(str(job["case_path"]), cutoff_event=job.get("cutoff_event"),
                           case_id=job.get("case_id"), task=job.get("task"), config=config, log=log)
-        render_answer(result["meta"]["case_id"], result, answer_dir)
+        render_answer(result["meta"]["case_id"], result, answer_dir, with_trace=with_trace)
         return {"answer_name": job["answer_name"], "case_id": result["meta"]["case_id"],
                 "decision": result["decision"].get("decision"), "escalated": result["decision"].get("escalated"),
                 "end_reason": result["meta"]["end_reason"], "cost_usd": result["meta"]["cost_usd"],
@@ -108,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--answers", help="Where to write ANSWERS/<n>/ (default depends on mode).")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--force", action="store_true", help="Redo cases that already have an answer.")
+    parser.add_argument("--with-trace", action="store_true",
+                        help="Also copy decision/transcript/ledger JSON into ANSWERS/<n>/trace/.")
     args = parser.parse_args(argv)
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -118,7 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cases_dir:
         run_name = args.run_name or f"reality-{stamp}"
         cases = discover_cases(Path(args.cases_dir))
-        jobs = [{"case_path": c, "answer_name": answer_folder_name(c), "task": args.task} for c in cases]
+        # ANSWERS/1, ANSWERS/2, ... in numeric order of the case folders (ANSWER.md names the source case).
+        jobs = [{"case_path": c, "answer_name": str(i), "task": args.task} for i, c in enumerate(cases, start=1)]
         answers_root = Path(args.answers) if args.answers else PROJECT_ROOT / "ANSWERS"
     else:
         run_name = args.run_name or f"single-{stamp}"
@@ -140,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     results = []
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
-        futures = [pool.submit(run_one, job, answers_root, config, args.force) for job in jobs]
+        futures = [pool.submit(run_one, job, answers_root, config, args.force, args.with_trace) for job in jobs]
         for future in as_completed(futures):
             results.append(future.result())
 

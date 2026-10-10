@@ -15,7 +15,10 @@ from tools import call_tool
 TEXT_DOC_TYPES = {".md", ".txt", ".eml", ".json", ".csv", ".html", ".htm", ".pdf", ".vtt", ".srt"}
 AUDIO_TYPES = {".mp3", ".wav", ".m4a", ".ogg", ".oga", ".flac", ".webm", ".mp4", ".aac", ".opus"}
 CASE_FILES = {"index.md", "history.md"}
-MAX_DOC_CHARS = 15_000
+IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp"}
+MAX_DOC_CHARS = 15_000          # a newly supplied document (email, transcript, report)
+MAX_ATTACHMENT_CHARS = 8_000    # each case attachment
+MAX_ATTACHMENTS_TOTAL = 40_000  # all case attachments together
 
 
 class BriefingError(RuntimeError):
@@ -29,6 +32,7 @@ class Briefing:
     case: dict
     screen: dict
     supplied_documents: list[dict] = field(default_factory=list)
+    attachments: list[dict] = field(default_factory=list)
 
 
 def _fmt_event(e: dict) -> str:
@@ -38,6 +42,31 @@ def _fmt_event(e: dict) -> str:
     return f"{head}\n{e['body'].strip() or '(no text)'}"
 
 
+def _read_document(case_id: str, path: str, max_chars: int) -> dict:
+    """Read one file through the normal tools (so it is ledgered). Never raises."""
+    suffix = Path(path).suffix.lower()
+    if suffix in AUDIO_TYPES:
+        result = call_tool("transcribe_audio", {"case_id": case_id, "path": path})
+        if result["ok"]:
+            return {"path": path, "kind": "audio", "text": result["data"]["text"][:max_chars],
+                    "note": f"audio transcribed by {result['data']['engine']}"}
+        return {"path": path, "kind": "audio", "text": None,
+                "note": f"audio could not be transcribed ({result['error']['code']}); its content is unknown"}
+    if suffix in IMAGE_TYPES:
+        return {"path": path, "kind": "image", "text": None,
+                "note": "image: contents not visible to the agent; do not assume what it shows"}
+    if suffix not in TEXT_DOC_TYPES:
+        return {"path": path, "kind": "other", "text": None, "note": f"unsupported file type {suffix or '(none)'}"}
+    result = call_tool("read_attachment", {"case_id": case_id, "path": path, "max_chars": max_chars})
+    if not result["ok"]:
+        return {"path": path, "kind": "unreadable", "text": None,
+                "note": f"could not be read ({result['error']['code']}): treat its content as unknown"}
+    data = result["data"]
+    note = (f"truncated at {max_chars} of {data['chars']} characters; use read_attachment (pages) for the rest"
+            if data.get("truncated") else None)
+    return {"path": path, "kind": data["kind"], "text": data["text"], "note": note}
+
+
 def _supplied_documents(case: dict, case_id: str) -> list[dict]:
     """Files placed directly in the case folder (beside index.md/history.md): new emails, transcripts, reports."""
     docs = []
@@ -45,23 +74,31 @@ def _supplied_documents(case: dict, case_id: str) -> list[dict]:
         path = att["path"]
         if "/" in path or Path(path).name in CASE_FILES or Path(path).name.startswith("."):
             continue
-        suffix = Path(path).suffix.lower()
-        if suffix in AUDIO_TYPES:
-            result = call_tool("transcribe_audio", {"case_id": case_id, "path": path})
-            if result["ok"]:
-                text = result["data"]["text"]
-                note = f"audio transcribed by {result['data']['engine']}"
-            else:
-                text = None
-                note = f"audio could not be transcribed ({result['error']['code']}); its content is unknown"
-            docs.append({"path": path, "kind": "audio", "text": text, "note": note})
-        elif suffix in TEXT_DOC_TYPES:
-            result = call_tool("read_attachment", {"case_id": case_id, "path": path, "max_chars": MAX_DOC_CHARS})
-            if result["ok"]:
-                docs.append({"path": path, "kind": result["data"]["kind"], "text": result["data"]["text"], "note": None})
-            else:
-                docs.append({"path": path, "kind": "unreadable", "text": None,
-                             "note": f"could not be read ({result['error']['code']}): treat its content as unknown"})
+        if Path(path).suffix.lower() in TEXT_DOC_TYPES | AUDIO_TYPES:
+            docs.append(_read_document(case_id, path, MAX_DOC_CHARS))
+    return docs
+
+
+def _case_attachments(case: dict, case_id: str) -> list[dict]:
+    """Every attachment visible at the cut-off is read in code, so it can never be overlooked."""
+    linked: dict[str, list[str]] = {}
+    for e in case.get("events", []):
+        for att in e.get("attachments", []):
+            linked.setdefault(att["path"], []).append(e["id"])
+    docs, budget = [], MAX_ATTACHMENTS_TOTAL
+    for att in case.get("attachments", []):
+        path = att["path"]
+        if "/" not in path:
+            continue  # supplied documents are handled separately
+        cap = max(0, min(MAX_ATTACHMENT_CHARS, budget))
+        if cap < 500:
+            doc = {"path": path, "kind": att["type"], "text": None,
+                   "note": "not included (briefing size limit reached); read it with read_attachment"}
+        else:
+            doc = _read_document(case_id, path, cap)
+            budget -= len(doc["text"] or "")
+        doc["linked_events"] = linked.get(path, [])
+        docs.append(doc)
     return docs
 
 
@@ -134,7 +171,8 @@ def build_briefing(
         "level": "unknown", "recommended_response": "screen failed - judge manually", "hazards": {},
         "escalation_flags": [], "negated_matches": []}
     docs = _supplied_documents(case, case_id)
-    for doc in docs:
+    attachments = _case_attachments(case, case_id)
+    for doc in docs + attachments:
         if doc["text"]:
             extra = call_tool("safety_screen", {"text": doc["text"]})
             if extra["ok"] and extra["data"]["hazards"]:
@@ -143,8 +181,19 @@ def build_briefing(
 
     events = case["events"]
     details = "\n".join(f"- {k}: {v}" for k, v in case["details"].items()) or "- (none supplied)"
-    attachments = [a for a in case["attachments"] if "/" in a["path"]]
-    attachment_lines = "\n".join(f"- {a['path']} ({a['type']})" for a in attachments) or "- none"
+    attachment_blocks = []
+    for doc in attachments:
+        where = (f"arrived with {', '.join(sorted(set(doc['linked_events'])))}" if doc["linked_events"]
+                 else "not linked to any visible event, so its date is unknown")
+        header = f"### {doc['path']} ({doc['kind']}; {where})"
+        if doc.get("screen_hazards"):
+            header += (f" - hazard keywords found: {doc['screen_hazards']} "
+                       "(may be standard report wording; judge in context)")
+        body = doc["text"] if doc["text"] else ""
+        if doc.get("note"):
+            body = (body + "\n" if body else "") + f"[{doc['note']}]"
+        attachment_blocks.append(f"{header}\n{body}")
+    attachments_section = "\n\n".join(attachment_blocks) if attachment_blocks else "None."
     extra_sections = "\n\n".join(f"## {k.title()}\n{v}" for k, v in case.get("other_sections", {}).items() if v)
 
     doc_blocks = []
@@ -173,7 +222,7 @@ def build_briefing(
         parts.append("## Question / task supplied with this case\n" + task)
     parts += [
         "## Newly supplied documents (read carefully: often the latest input)\n" + docs_section,
-        "## Attachments in the case folder (use read_attachment)\n" + attachment_lines,
+        "## Case attachments (text extracted automatically; use these facts and cite them)\n" + attachments_section,
         "## Data-quality flags\n" + _format_quality(case["data_quality"]),
         "## Safety screen (automatic, rule-based)\n" + _format_screen(screen),
         "## Full event history (oldest first)\n" + ("\n\n".join(_fmt_event(e) for e in events) or "(no events)"),
@@ -181,4 +230,5 @@ def build_briefing(
         "## Your task\nDecide and carry out the agency's next step at this point in the case, then call "
         "submit_decision exactly once.",
     ]
-    return Briefing(case_id=case_id, text="\n\n".join(parts), case=case, screen=screen, supplied_documents=docs)
+    return Briefing(case_id=case_id, text="\n\n".join(parts), case=case, screen=screen,
+                    supplied_documents=docs, attachments=attachments)
