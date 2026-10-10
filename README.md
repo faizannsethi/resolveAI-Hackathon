@@ -249,7 +249,6 @@ No other external services are used. All agency actions are simulated locally.
 
 ## 7. Known limitations
 
-- **No real integrations yet.** Nothing is actually sent to tenants, landlords or contractors.
 - **Voice is browser-based.** The intake runs in the browser, and the tenant's update is an MP3 rather than a phone call.
 - **Photos aren't looked at.** Image attachments are listed, but their content isn't analysed.
 - **The safety screen is keyword-based** and catches too much on purpose. The model decides what really matters.
