@@ -20,7 +20,7 @@ https://github.com/faizannsethi/resolveAI-Hackathon
 
 ## Commit at the 17:00 code freeze
 
-`TO FILL: commit hash`
+`af5c03286e98b23b2d7f474db879237828174162`
 
 ## Reality Test results
 
