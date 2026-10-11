@@ -11,3 +11,4 @@ voice/recordings/
 voice/callbacks/
 voice/outbox/
 voice/answers/
+.env.example
